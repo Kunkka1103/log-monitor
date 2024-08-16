@@ -23,7 +23,7 @@ type LogEntry struct {
 	Duration   string
 	IP         string
 	Method     string
-	APIPath   string
+	APIPath    string
 }
 
 // ParseLogWithAWK uses awk to process a log line and returns a LogEntry
@@ -50,11 +50,22 @@ func ParseLogWithAWK(line, server, program string) (*LogEntry, error) {
 			Duration:   fields[3],
 			IP:         fields[4],
 			Method:     fields[5],
-			APIPath:   apiPath,
+			APIPath:    apiPath,
 		}, nil
 	}
 
 	return nil, fmt.Errorf("failed to parse log line: %s", line)
+}
+
+// LongestMatch finds the longest matching API path in the list
+func LongestMatch(apiPath string, apiList map[string]struct{}) string {
+	longestMatch := ""
+	for api := range apiList {
+		if strings.HasPrefix(apiPath, api) && len(api) > len(longestMatch) {
+			longestMatch = api
+		}
+	}
+	return longestMatch
 }
 
 // InsertLogEntry inserts a log entry into the database
@@ -94,8 +105,10 @@ func monitorLogs(program string, db *sql.DB, apiList map[string]struct{}, server
 				log.Printf("Error parsing log line with awk: %v", err)
 				continue
 			}
-			// Check if APIPath is in the API list
-			if _, exists := apiList[entry.APIPath]; exists {
+			// Find the longest matching APIPath
+			matchedAPIPath := LongestMatch(entry.APIPath, apiList)
+			if matchedAPIPath != "" {
+				entry.APIPath = matchedAPIPath
 				err := InsertLogEntry(db, entry)
 				if err != nil {
 					log.Printf("Error inserting log entry: %v", err)
