@@ -1,18 +1,16 @@
-# Makefile for log-monitor
-
-# Go build variables
-GO ?= go
+# 查找 go 命令的路径
+GO := $(shell which go)
 BINARY_NAME = log-monitor
 SRC = main.go
 
-# Default target
+# 默认目标
 all: build
 
-# Build the binary
+# 构建二进制文件
 build:
 	$(GO) build -o $(BINARY_NAME) $(SRC)
 
-# Clean the build
+# 清理生成的文件
 clean:
 	rm -f $(BINARY_NAME)
 
