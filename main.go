@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 )
@@ -69,17 +71,21 @@ func LongestMatch(apiPath string, apiList map[string]struct{}) string {
 }
 
 // InsertLogEntry inserts a log entry into the database
-func InsertLogEntry(db *sql.DB, entry *LogEntry) error {
-	log.Printf("Inserting log entry: %+v", entry)
+func InsertLogEntry(db *sql.DB, entries []*LogEntry) error {
+	log.Printf("Inserting %d log entries", len(entries))
 	query := `
-		INSERT INTO oula_logs_record (server,program,date, time, status_code, duration, ip, method, api_path)
+		INSERT INTO oula_logs_record (server, program, date, time, status_code, duration, ip, method, api_path)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
-	_, err := db.Exec(query, entry.Server, entry.Program, entry.Date, entry.Time, entry.StatusCode, entry.Duration, entry.IP, entry.Method, entry.APIPath)
-	if err != nil {
-		log.Printf("Error inserting log entry: %v", err)
+
+	for _, entry := range entries {
+		_, err := db.Exec(query, entry.Server, entry.Program, entry.Date, entry.Time, entry.StatusCode, entry.Duration, entry.IP, entry.Method, entry.APIPath)
+		if err != nil {
+			log.Printf("Error inserting log entry: %v", err)
+			return err
+		}
 	}
-	return err
+	return nil
 }
 
 // monitorLogs monitors the logs from supervisorctl and processes them
@@ -95,9 +101,18 @@ func monitorLogs(program string, db *sql.DB, apiList map[string]struct{}, server
 		log.Fatalf("Error starting command for %s: %v", program, err)
 	}
 
-	scanner := bufio.NewScanner(stdout)
-	for scanner.Scan() {
-		line := scanner.Text()
+	reader := bufio.NewReader(stdout)
+	batchSize := 100
+	entries := []*LogEntry{}
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			log.Fatalf("Error reading stdout: %v", err)
+		}
+
 		if strings.Contains(line, "GIN") {
 			log.Println("Found GIN log line")
 			entry, err := ParseLogWithAWK(line, server, program)
@@ -109,11 +124,17 @@ func monitorLogs(program string, db *sql.DB, apiList map[string]struct{}, server
 			matchedAPIPath := LongestMatch(entry.APIPath, apiList)
 			if matchedAPIPath != "" {
 				entry.APIPath = matchedAPIPath
-				err := InsertLogEntry(db, entry)
-				if err != nil {
-					log.Printf("Error inserting log entry: %v", err)
-				} else {
-					log.Println("Log entry inserted successfully")
+				entries = append(entries, entry)
+
+				// Insert in batch when batchSize is reached
+				if len(entries) >= batchSize {
+					err := InsertLogEntry(db, entries)
+					if err != nil {
+						log.Printf("Error inserting log entry: %v", err)
+					} else {
+						log.Println("Log entries inserted successfully")
+					}
+					entries = []*LogEntry{} // Reset the batch
 				}
 			} else {
 				log.Printf("APIPath did not match: %s", entry.APIPath)
@@ -121,8 +142,24 @@ func monitorLogs(program string, db *sql.DB, apiList map[string]struct{}, server
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		log.Fatalf("Error reading stdout: %v", err)
+	// Insert any remaining entries
+	if len(entries) > 0 {
+		err := InsertLogEntry(db, entries)
+		if err != nil {
+			log.Printf("Error inserting remaining log entries: %v", err)
+		} else {
+			log.Println("Remaining log entries inserted successfully")
+		}
+	}
+}
+
+// CleanOldLogs deletes logs older than 8 days from the database
+func CleanOldLogs(db *sql.DB) {
+	log.Println("Cleaning old logs older than 8 days")
+	query := `DELETE FROM oula_logs_record WHERE date < NOW() - INTERVAL 8 DAY`
+	_, err := db.Exec(query)
+	if err != nil {
+		log.Printf("Error cleaning old logs: %v", err)
 	}
 }
 
@@ -148,6 +185,14 @@ func main() {
 		log.Fatalf("Error connecting to the database: %v", err)
 	}
 	defer db.Close()
+
+	// 定期清理旧数据，每天清理一次
+	go func() {
+		for {
+			CleanOldLogs(db)
+			time.Sleep(24 * time.Hour)
+		}
+	}()
 
 	// 处理要监控的程序列表
 	programs := strings.Split(*programList, ",")
